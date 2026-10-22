@@ -38,8 +38,8 @@ def find_chunk_boundaries(
                 chunk_boundaries[bi] = file_size
                 break
 
-            # Find the special token in the mini chunk
-            found_at = mini_chunk.find(split_special_token)
+            # Find the first special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token) 
             if found_at != -1:
                 chunk_boundaries[bi] = initial_position + found_at
                 break
