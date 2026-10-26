@@ -300,7 +300,7 @@ def train_bpe(input_path:str,vocab_size:int,special_tokens:list[str]):
     
 
     with open(input_path,"rb") as f:
-        num_processes = 16
+        num_processes = 8
         boundaries = find_chunk_boundaries(f,num_processes,split_special_token)
 
         # use multiprocessing to paralize the task on multi-core cpu
