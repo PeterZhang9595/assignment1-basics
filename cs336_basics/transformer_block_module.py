@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch import Tensor
 from einops import rearrange,einsum,reduce
 from jaxtyping import Float,Bool
-from cs336_basics.linear import Linear
+from cs336_basics.linear import Linear,Embedding
 
 class RMSNorm(nn.Module):
     def __init__(self,d_model:int,eps:float=1e-5,weight=None,device=None,dtype=None):
@@ -185,4 +185,110 @@ class multihead_self_attention(nn.Module):
         return self.o_proj_weight.forward(multihead_attention_score)
 
 
+
+def extract_weights1(weights: dict[str, torch.Tensor]):
+    # attention 投影
+    q_w = weights['attn.q_proj.weight']       # [d_model, d_model]
+    k_w = weights['attn.k_proj.weight']       # [d_model, d_model]
+    v_w = weights['attn.v_proj.weight']       # [d_model, d_model]
+    o_w = weights['attn.output_proj.weight']  # [d_model, d_model]
+
+    # RMSNorm
+    ln1_w = weights['ln1.weight']             # [d_model]
+    ln2_w = weights['ln2.weight']             # [d_model]
+
+    # SwiGLU FFN
+    ffn_w1 = weights['ffn.w1.weight']         # [d_ff, d_model]
+    ffn_w2 = weights['ffn.w2.weight']         # [d_model, d_ff]
+    ffn_w3 = weights['ffn.w3.weight']         # [d_ff, d_model]
+
+
+    return {
+        'q': q_w, 'k': k_w, 'v': v_w, 'o': o_w,
+        'ln1': ln1_w, 'ln2': ln2_w,
+        'ffn_w1': ffn_w1, 'ffn_w2': ffn_w2, 'ffn_w3': ffn_w3
+    }
+class TransformerBlock(nn.Module):
+    def __init__(self,d_model,num_heads,d_ff,max_seq_len=None,theta=None,weights=None):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.max_seq_len = max_seq_len
+        self.theta = theta 
+        if weights is not None:
+            weights_dict = extract_weights1(weights)
+            self.rmsnorm1 = RMSNorm(d_model,weight=weights_dict['ln1'])
+            self.rmsnorm2 = RMSNorm(d_model,weight=weights_dict['ln2'])
+            self.mha = multihead_self_attention(d_model,num_heads,max_seq_len=self.max_seq_len,theta=self.theta,q=weights_dict['q'],k=weights_dict['k'],v=weights_dict['v'],o=weights_dict['o'])
+            self.ffn = SwiGLU(d_model,d_ff,w1_weight=weights_dict['ffn_w1'],w2_weight=weights_dict['ffn_w2'],w3_weight=weights_dict['ffn_w3'])
+        else:
+            self.rmsnorm1 = RMSNorm(d_model)
+            self.rmsnorm2 = RMSNorm(d_model)
+            self.mha = multihead_self_attention(d_model,num_heads,max_seq_len=self.max_seq_len,theta=self.theta)
+            self.ffn = SwiGLU(d_model,d_ff)
+        
+    def forward(self,x):
+        x = x + self.mha(self.rmsnorm1(x))
+        return x + self.ffn(self.rmsnorm2(x))
+
+def split_weights_by_layer(weights: dict, num_layers: int):
+    """
+    将大字典拆分为 num_layers 个层字典 + 1 个全局字典
+    返回:
+        layer_dicts: List[dict], 长度为 num_layers
+        global_dict: dict, 包含 token_embeddings, ln_final, lm_head
+    """
+    layer_dicts = [{} for _ in range(num_layers)]
+
+
+    for key, value in weights.items():
+        if key.startswith("layers."):
+            parts = key.split(".")
+            layer_idx = int(parts[1])        # 提取层序号
+            new_key = ".".join(parts[2:])    # 去掉 "layers.{i}." 前缀
+            layer_dicts[layer_idx][new_key] = value
+
+    return layer_dicts
+
+
+class TransformerLM(nn.Module):
+    def __init__(self, d_model, num_heads, d_ff, vocab_size, context_length, num_layers, rope_theta, weights):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff 
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.rope_theta = rope_theta
+
+        # 1. Embedding
+        self.embedding = Embedding.from_pretrained(vocab_size, d_model, weights['token_embeddings.weight'])
+        
+        # 2. 拆分出每一层的权重字典（内部 key 已去掉 "layers.{i}." 前缀，完美匹配 extract_weights1）
+        layer_weights = split_weights_by_layer(weights, num_layers)
+        
+        # 3. 实例化每一层的 TransformerBlock，直接传入 layer_weights[i]
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(
+                d_model=d_model,
+                num_heads=num_heads,
+                d_ff=d_ff,
+                max_seq_len=context_length,
+                theta=rope_theta,
+                weights=layer_weights[i]  # 这里直接传入对应层的字典
+            )
+            for i in range(num_layers)
+        ])
+        
+        # 4. 最终层 RMSNorm 和 LM Head
+        self.ln_final = RMSNorm.from_pretrained(d_model, weight=weights['ln_final.weight'])
+        self.lm_head = Linear.from_pretrained(d_model,vocab_size,weights['lm_head.weight'])
+
+    def forward(self, x):
+        x = self.embedding(x)
+        for block in self.transformer_blocks:
+            x = block(x)
+        x = self.ln_final(x)
+        return self.lm_head(x)
         

@@ -11,7 +11,7 @@ from torch import Tensor
 from cs336_basics.bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.linear import Linear,Embedding
-from cs336_basics.transformer_block_module import RMSNorm,SwiGLU,silu,RoPE,softmax,scaled_dot_product_attention,multihead_self_attention
+from cs336_basics.transformer_block_module import RMSNorm,SwiGLU,silu,RoPE,softmax,scaled_dot_product_attention,multihead_self_attention,TransformerBlock,TransformerLM
 
 
 def run_linear(
@@ -282,7 +282,8 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    transformerblock = TransformerBlock(d_model,num_heads,d_ff,max_seq_len,theta,weights)
+    return transformerblock.forward(in_features)
 
 
 def run_transformer_lm(
@@ -364,7 +365,24 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+        # 1. 实例化 TransformerLM，用关键字参数对齐 __init__ 签名
+    lm_model = TransformerLM(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        num_layers=num_layers,
+        rope_theta=rope_theta,
+        weights=weights
+    )
+    
+    # 2. 切换到 eval 模式并关闭梯度计算（推理必须）
+    lm_model.eval()
+    with torch.no_grad():
+        output = lm_model(in_indices)
+        
+    return output
 
 
 def run_rmsnorm(
